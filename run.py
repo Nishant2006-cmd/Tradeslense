@@ -28,6 +28,7 @@ def clean_symbol(raw_symbol):
     if not isinstance(raw_symbol, str):
         return ""
     return raw_symbol.split(".")[0].upper()
+
 def process_mt5_csv(filepath):
     df = None
     for sep in ["\t", ",", ";"]:
@@ -43,25 +44,34 @@ def process_mt5_csv(filepath):
             break
             
     if df is None:
-        df = pd.read_csv(filepath, encoding="latin-1", on_bad_lines="skip")
+        try:
+            df = pd.read_csv(filepath, encoding="latin-1", on_bad_lines="skip")
+        except Exception:
+            return []
         
     trades = []
-    
     for _, row in df.iterrows():
-        t_type = str(row.get("Type", "")).lower()
+        # Flexible column lookups
+        row_dict = {str(k).lower().strip(): v for k, v in row.items() if pd.notna(k)}
+        
+        t_type = str(row_dict.get("type", row_dict.get("action", ""))).lower()
         if t_type not in ["buy", "sell"]:
             continue
             
-        ticket = row.get("Ticket")
+        ticket = row_dict.get("ticket", row_dict.get("order", row_dict.get("id")))
         if pd.isna(ticket):
             continue
             
-        trade_id = f"mt5-{int(ticket)}"
-        raw_symbol = str(row.get("Symbol", ""))
+        try:
+            trade_id = f"mt5-{int(float(ticket))}"
+        except Exception:
+            trade_id = f"mt5-{ticket}"
+            
+        raw_symbol = str(row_dict.get("symbol", row_dict.get("item", "")))
         symbol = clean_symbol(raw_symbol)
         asset_class = get_asset_class(symbol)
         
-        time_str = str(row.get("Time", ""))
+        time_str = str(row_dict.get("time", row_dict.get("date", "")))
         try:
             dt_utc = datetime.strptime(time_str.replace(".", "-"), "%Y-%m-%d %H:%M:%S")
         except ValueError:
@@ -75,16 +85,31 @@ def process_mt5_csv(filepath):
                 
         if pd.isna(dt_utc):
             continue
-                
+            
         dt_ist = dt_utc + timedelta(hours=5, minutes=30)
         close_date = dt_ist.strftime("%Y-%m-%d")
         close_time = dt_ist.strftime("%H:%M:%S")
         
-        quantity = float(row.get("Volume", 0.0))
-        profit = float(row.get("Profit", 0.0))
-        commission = float(row.get("Commission", 0.0))
-        swap = float(row.get("Swap", 0.0))
-        
+        try:
+            quantity = float(row_dict.get("volume", row_dict.get("size", row_dict.get("lots", 0.0))))
+        except Exception:
+            quantity = 0.0
+            
+        try:
+            profit = float(row_dict.get("profit", 0.0))
+        except Exception:
+            profit = 0.0
+            
+        try:
+            commission = float(row_dict.get("commission", 0.0))
+        except Exception:
+            commission = 0.0
+            
+        try:
+            swap = float(row_dict.get("swap", 0.0))
+        except Exception:
+            swap = 0.0
+            
         pnl_native = round(profit + commission + swap, 2)
         
         trades.append({
@@ -102,12 +127,15 @@ def process_mt5_csv(filepath):
     return trades
 
 def process_broker_excel(filepath):
-    raw_df = pd.read_excel(filepath, header=None)
+    try:
+        raw_df = pd.read_excel(filepath, header=None)
+    except Exception:
+        return []
+        
     header_row_idx = None
-    
     for idx, row in raw_df.iterrows():
         row_str = " ".join([str(val) for val in row.values])
-        if "Order ID" in row_str or "Trade Date" in row_str or "Realized P&L" in row_str or "Symbol" in row_str:
+        if any(kw in row_str.lower() for kw in ["order id", "trade date", "realized p&l", "symbol"]):
             header_row_idx = idx
             break
             
@@ -118,65 +146,60 @@ def process_broker_excel(filepath):
         
     trades = []
     for _, row in df.iterrows():
-        order_id = None
-        for col in df.columns:
-            if "order" in str(col).lower() and "id" in str(col).lower():
-                order_id = row[col]
-                break
-        if order_id is None or pd.isna(order_id):
-            for col in ["Order ID", "OrderNo", "Order ID/Trade ID"]:
-                if col in df.columns:
-                    order_id = row[col]
-                    break
-        if order_id is None or pd.isna(order_id):
-            continue
-            
-        if "total" in str(order_id).lower():
-            continue
-            
-        trade_id = f"in-{int(order_id) if isinstance(order_id, (int, float)) else order_id}"
+        row_dict = {str(k).lower().strip(): v for k, v in row.items() if pd.notna(k)}
         
+        order_id = None
+        for k, v in row_dict.items():
+            if "order" in k or "trade" in k or "id" in k:
+                order_id = v
+                break
+        if order_id is None or pd.isna(order_id) or "total" in str(order_id).lower():
+            continue
+            
+        try:
+            trade_id = f"in-{int(float(order_id))}"
+        except Exception:
+            trade_id = f"in-{order_id}"
+            
         raw_symbol = ""
-        for col in df.columns:
-            if "symbol" in str(col).lower():
-                raw_symbol = str(row[col])
+        for k, v in row_dict.items():
+            if "symbol" in k:
+                raw_symbol = str(v)
                 break
         symbol = clean_symbol(raw_symbol)
         asset_class = get_asset_class(symbol)
         
         date_val = None
-        for col in df.columns:
-            if "date" in str(col).lower():
-                date_val = row[col]
+        for k, v in row_dict.items():
+            if "date" in k:
+                date_val = v
                 break
-        
+                
         if pd.isna(date_val):
             continue
             
         if isinstance(date_val, datetime):
             close_date = date_val.strftime("%Y-%m-%d")
         else:
-            date_str = str(date_val).strip()
-            parsed_dt = pd.to_datetime(date_str, errors='coerce', dayfirst=True)
+            parsed_dt = pd.to_datetime(str(date_val).strip(), errors='coerce', dayfirst=True)
             if pd.isna(parsed_dt):
                 continue
             close_date = parsed_dt.strftime("%Y-%m-%d")
             
         qty = 0.0
-        for col in df.columns:
-            if "qty" in str(col).lower() or "quantity" in str(col).lower():
+        for k, v in row_dict.items():
+            if "qty" in k or "quantity" in k or "lots" in k:
                 try:
-                    qty = float(row[col])
+                    qty = float(v)
                 except Exception:
                     pass
                 break
                 
         pnl_val = 0.0
-        for col in df.columns:
-            if "p&l" in str(col).lower() or "realized" in str(col).lower() or "profit" in str(col).lower():
-                val_str = str(row[col]).replace(",", "").strip()
+        for k, v in row_dict.items():
+            if "p&l" in k or "realized" in k or "profit" in k or "pnl" in k:
                 try:
-                    pnl_val = float(val_str)
+                    pnl_val = float(str(v).replace(",", "").strip())
                 except Exception:
                     pass
                 break
@@ -203,10 +226,20 @@ def main():
     
     with open(args.rules, "r") as f:
         rules = json.load(f)
+        
     usd_inr = float(rules.get("usd_inr", 84.0))
     
-    all_trades = []
+    # Dynamically parse rules from the rules list
+    rule_limits = {}
+    rule_ids = {}
+    for r in rules.get("rules", []):
+        rtype = r.get("type")
+        limit = r.get("limit")
+        rid = r.get("id", rtype)
+        rule_limits[rtype] = limit
+        rule_ids[rtype] = rid
     
+    all_trades = []
     for root, _, files in os.walk(args.data):
         for file in files:
             filepath = os.path.join(root, file)
@@ -215,10 +248,10 @@ def main():
             elif file.endswith(".xlsx") or file.endswith(".xls"):
                 all_trades.extend(process_broker_excel(filepath))
                 
+    # Deduplicate trades by trade_id
     unique_trades_dict = {}
     for t in all_trades:
-        tid = t["trade_id"]
-        unique_trades_dict[tid] = t
+        unique_trades_dict[t["trade_id"]] = t
         
     trades_list = list(unique_trades_dict.values())
     
@@ -246,7 +279,6 @@ def main():
     win_rate = round(winning_trades / total_trades, 4) if total_trades > 0 else 0.0
     net_pnl_inr = round(sum(t["pnl_inr"] for t in trades_list), 2)
     
-    by_asset_class = {}
     ac_groups = {}
     for t in trades_list:
         ac = t["asset_class"]
@@ -255,8 +287,7 @@ def main():
         ac_groups[ac]["trades"] += 1
         ac_groups[ac]["net_pnl_inr"] = round(ac_groups[ac]["net_pnl_inr"] + t["pnl_inr"], 2)
         
-    for ac, vals in sorted(ac_groups.items()):
-        by_asset_class[ac] = vals
+    by_asset_class = {ac: ac_groups[ac] for ac in sorted(ac_groups.keys())}
         
     daily_groups = {}
     for t in trades_list:
@@ -292,8 +323,6 @@ def main():
         json.dump(summary_data, f, indent=2)
         
     violations = []
-    rule_limits = rules.get("limits", {})
-    
     max_trades_limit = rule_limits.get("max_trades_per_day")
     max_loss_limit = rule_limits.get("max_daily_loss_inr")
     max_consec_losses_limit = rule_limits.get("stop_after_consecutive_losses")
@@ -310,7 +339,7 @@ def main():
         if max_trades_limit is not None and len(d_trades) > max_trades_limit:
             violations.append({
                 "date": d,
-                "rule_id": "max_trades_per_day",
+                "rule_id": rule_ids.get("max_trades_per_day", "max_trades_per_day"),
                 "detail": f"{len(d_trades)} trades (limit {max_trades_limit})"
             })
             
@@ -318,7 +347,7 @@ def main():
         if max_loss_limit is not None and day_pnl < -abs(max_loss_limit):
             violations.append({
                 "date": d,
-                "rule_id": "max_daily_loss_inr",
+                "rule_id": rule_ids.get("max_daily_loss_inr", "max_daily_loss_inr"),
                 "detail": f"Day PnL INR {day_pnl} below limit -{max_loss_limit}"
             })
             
@@ -327,7 +356,7 @@ def main():
                 if t["source"] == "mt5" and t["quantity"] > max_lot_limit:
                     violations.append({
                         "date": d,
-                        "rule_id": "max_lot_size",
+                        "rule_id": rule_ids.get("max_lot_size", "max_lot_size"),
                         "detail": f"Lot size {t['quantity']} exceeds limit {max_lot_limit} for trade {t['trade_id']}"
                     })
                     
@@ -341,7 +370,7 @@ def main():
                 if consec_losses >= max_consec_losses_limit and not broken_recorded:
                     violations.append({
                         "date": d,
-                        "rule_id": "stop_after_consecutive_losses",
+                        "rule_id": rule_ids.get("stop_after_consecutive_losses", "stop_after_consecutive_losses"),
                         "detail": f"Trade {t['trade_id']} executed after {consec_losses} consecutive losses (limit {max_consec_losses_limit})"
                     })
                     broken_recorded = True
@@ -356,23 +385,45 @@ def main():
         df_viol = pd.DataFrame(columns=["date", "rule_id", "detail"])
     df_viol.to_csv(os.path.join(args.out, "violations.csv"), index=False)
     
-    report_content = f"""# Weekly Trading Discipline Report
+    # LLM Report Generation with fallback to template (Point #3)
+    report_content = None
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("API_KEY")
+    if api_key:
+        try:
+            from google import genai
+            client = genai.Client(api_key=api_key)
+            prompt = f"""Write a professional weekly trading discipline and performance report in Markdown format based on:
+- Total Trades: {total_trades}
+- Win Rate: {win_rate * 100:.1f}%
+- Net PnL: ₹{net_pnl_inr:,.2f}
+- Violations Count: {len(violations)}
+- Summary: {json.dumps(summary_data)}
+- Violations: {json.dumps(violations)}
+Include Performance Review and Risk Management sections."""
+            response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+            if response and response.text:
+                report_content = response.text
+        except Exception:
+            pass
+
+    if not report_content:
+        report_content = f"""# Weekly Trading Discipline Report
 
 - **Total Trades:** {total_trades}
-- **Win Rate:** {{:.1f}}% ({winning_trades} wins / {losing_trades} losses)
+- **Win Rate:** {win_rate * 100:.1f}% ({winning_trades} wins / {losing_trades} losses)
 - **Net PnL:** ₹{net_pnl_inr:,.2f}
 - **Rule Violations Detected:** {len(violations)}
 
 ## Performance Review
-During this trading period, you took a total of {total_trades} trades resulting in a net PnL of ₹{net_pnl_inr:,.2f}. Your win rate stands at {win_rate * 100:.1f}%. 
+During this trading period, you took a total of {total_trades} trades resulting in a net PnL of ₹{net_pnl_inr:,.2f}. Your win rate stands at {win_rate * 100:.1f}%.
 
 ## Discipline & Risk Management
-{'No major rule violations were recorded.' if len(violations) == 0 else f'A total of {len(violations)} rule infraction(s) were flagged in `violations.csv`. Review your daily risk limits and consecutive loss thresholds.'} 
+{'No major rule violations were recorded.' if len(violations) == 0 else f'A total of {len(violations)} rule infraction(s) were flagged in `violations.csv`. Review your daily risk limits and consecutive loss thresholds.'}
 
 Maintain strict adherence to your risk management parameters to ensure long-term consistency.
-""".format(win_rate * 100)
+"""
 
-    with open(os.path.join(args.out, "report.md"), "w",encoding="utf-8") as f:
+    with open(os.path.join(args.out, "report.md"), "w", encoding="utf-8") as f:
         f.write(report_content)
 
 if __name__ == "__main__":

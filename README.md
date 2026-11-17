@@ -1,6 +1,6 @@
 # TradeLens Engine
 
-TradeLens is a local Python-based trading journal, analytics engine, and risk-management compliance checker designed to parse messy broker reports and MT5 CSVs, standardize currencies, and enforce trading discipline rules.
+TradeLens is a local Python-based trading journal, analytics engine, and risk-management compliance checker designed to parse broker reports and MT5 CSVs, standardize currencies, and enforce trading discipline rules.
 
 ## Project Structure
 - `run.py`: Core execution script for data ingestion, rule evaluation, and reporting.
